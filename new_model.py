@@ -1,0 +1,134 @@
+import os
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torch.optim import AdamW
+from transformers import GPT2Tokenizer, GPT2LMHeadModel
+
+PROJECT_ROOT = r"C:\Users\KIIT\OneDrive\Desktop\projects"
+TRAIN_FILE = os.path.join(PROJECT_ROOT, "train", "dialogues_train.txt")
+SAVE_DIR = "chatbot_model.0"
+BATCH_SIZE = 4
+MAX_LEN = 64
+EPOCHS = 2
+LR = 5e-5
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
+os.makedirs(SAVE_DIR, exist_ok=True)
+
+def load_dialogs(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return [line.strip() for line in f if line.strip()]
+
+train_dialogs = load_dialogs(TRAIN_FILE)
+print("Total raw dialogues:", len(train_dialogs))
+
+def split_dialogue(dialogue_line):
+    utterances = dialogue_line.split("__eou__")
+    return [u.strip() for u in utterances if u.strip()]
+
+def build_pairs(dialog_lines):
+    inputs = []
+    outputs = []
+
+    for line in dialog_lines:
+        utterances = split_dialogue(line)
+        for i in range(len(utterances) - 1):
+            inputs.append(utterances[i])
+            outputs.append(utterances[i + 1] + " __eou__")
+    return inputs, outputs
+
+train_inputs, train_outputs = build_pairs(train_dialogs)
+print("Total training pairs:", len(train_inputs))
+for i in range(5):
+    print(train_inputs[i])
+    print(train_outputs[i])
+    print("  ")
+
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+tokenizer.add_special_tokens({
+    "eos_token": "__eou__",
+    "pad_token": "<pad>"
+})
+
+
+class DialogDataset(Dataset):
+    def __init__(self, inputs, outputs, tokenizer, max_len):
+        self.inputs = inputs
+        self.outputs = outputs
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.inputs)
+
+    def __getitem__(self, idx):
+        source = "User: " + self.inputs[idx] + " Bot:"
+        target = self.outputs[idx]
+        full_text = source + " " + target
+
+        encoding = self.tokenizer(
+            full_text,
+            truncation=True,
+            padding="max_length",
+            max_length=self.max_len,
+            return_tensors="pt"
+        )
+        input_ids = encoding["input_ids"].squeeze(0)
+        attention_mask = encoding["attention_mask"].squeeze(0)
+
+        labels = input_ids.clone()
+        labels[attention_mask == 0] = -100
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels
+        }
+train_dataset = DialogDataset(train_inputs, train_outputs, tokenizer, MAX_LEN)
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+print(train_dataset[0])
+
+
+
+model = GPT2LMHeadModel.from_pretrained("gpt2")
+model.resize_token_embeddings(len(tokenizer))
+model.to(device)
+
+
+optimizer = AdamW(model.parameters(), lr=LR)
+
+model.train()
+
+for epoch in range(EPOCHS):
+    total_loss = 0
+
+    for batch_idx, batch in enumerate(train_loader):
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
+
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels
+        )
+
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        total_loss += loss.item()
+        if batch_idx % 2000 == 0:
+            print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+
+    avg_loss = total_loss / len(train_loader)
+    print(f"Epoch {epoch+1} completed | Avg Loss: {avg_loss:.4f}")
+    model.save_pretrained(SAVE_DIR)
+    tokenizer.save_pretrained(SAVE_DIR)
+
+model.save_pretrained(SAVE_DIR)
+tokenizer.save_pretrained(SAVE_DIR)
+print("Model saved to:", SAVE_DIR)
